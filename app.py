@@ -438,7 +438,7 @@ with tab_group:
     table = build_metrics_table(base, "Group", order=GROUP_ORDER)
     totals = build_totals_row(table)
 
-    st.subheader(f"Overview — {', '.join(selected_countries)}")
+    st.subheader(f"Overview — {', '.join(selected_countries)} | {start_date} to {end_date}")
 
     t = totals.iloc[0]
     kpis = [
@@ -616,7 +616,7 @@ with tab_brand:
         unmatched = vendor_df[vendor_df["Brand"].isna()]
 
         # ---- Single overall overview (all brands combined) ----
-        st.subheader(f"Overall Overview — {', '.join(selected_countries)}")
+        st.subheader(f"Overall Overview — {', '.join(selected_countries)} | {start_date} to {end_date}")
         st.caption("Brand is derived from the first 4 characters of the Advertised SKU (e.g. 'VIZA-FBA-93344-11.5' → VIZA).")
 
         overall_table = build_metrics_table(matched, "Brand").sort_values("Sales", ascending=False)
@@ -746,7 +746,7 @@ with tab_campaign:
         campaign_df = base.copy()
         campaign_df["Campaign"] = campaign_df[campaign_col].astype(str).str.strip()
 
-        st.subheader(f"Campaign Overview — {', '.join(selected_countries)}")
+        st.subheader(f"Campaign Overview — {', '.join(selected_countries)} | {start_date} to {end_date}")
         st.caption(
             "Scoped to the same FBA-prefixed portfolios as the Portfolio Group tab, excluding any 'Vizari' portfolios."
         )

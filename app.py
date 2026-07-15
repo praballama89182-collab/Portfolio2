@@ -276,12 +276,12 @@ def build_totals_row(table: pd.DataFrame) -> pd.DataFrame:
     totals["CTR %"] = (totals["Clicks"] / totals["Impressions"] * 100).round(2).fillna(0)
     return totals[["Impressions", "Clicks", "CTR %", "Spend", "Sales", "ACOS %", "ROAS"]]
 
-# ACOS: <=5% is flat green (good); above 5% grades from pale to deep red as it worsens.
-# ROAS: always graded red, but inverted — low ROAS (bad) is deep red, high ROAS (good) is pale.
+# ACOS: <=5% is flat green (good); above 5% grades from pale to red as it worsens.
+# ROAS: always graded red, but inverted — low ROAS (bad) is more red, high ROAS (good) is pale.
 ACOS_GOOD_THRESHOLD = 5.0
-COLOR_GOOD_GREEN = (200, 230, 201)   # flat green for ACOS <= threshold
+COLOR_GOOD_GREEN = (129, 199, 132)   # clearer, more vivid green for ACOS <= threshold
 COLOR_RED_LOW = (255, 245, 245)      # near-white pale red (low intensity)
-COLOR_RED_HIGH = (198, 40, 40)       # medium-dark red for ACOS (high intensity, kept readable)
+COLOR_RED_HIGH = (229, 115, 115)     # softened red ceiling for ACOS — clearly red, stays readable
 COLOR_ROAS_RED_HIGH = (239, 154, 154)  # lighter red ceiling for ROAS — stays soft even at its worst
 
 def _interp_style(c0, c1, t):

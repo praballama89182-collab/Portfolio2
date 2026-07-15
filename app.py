@@ -191,11 +191,36 @@ if not selected_countries:
     st.warning("Select at least one country from the sidebar.")
     st.stop()
 
+# ---- Date range filter (custom start/end) ----
+min_date_available = df["Date"].min().date()
+max_date_available = df["Date"].max().date()
+
+date_range = st.sidebar.date_input(
+    "Date range",
+    value=(min_date_available, max_date_available),
+    min_value=min_date_available,
+    max_value=max_date_available,
+)
+
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date, end_date = date_range
+elif isinstance(date_range, tuple) and len(date_range) == 1:
+    # Only the start of the range has been picked so far — wait for the end date.
+    st.sidebar.info("Pick an end date to complete the range.")
+    st.stop()
+else:
+    start_date = end_date = date_range
+
+if start_date > end_date:
+    st.sidebar.error("Start date must be before end date.")
+    st.stop()
+
 # =================================================================
-# Base filtered dataset (FBA-classified rows, selected countries)
+# Base filtered dataset (FBA-classified rows, selected countries, selected date range)
 # =================================================================
 base = df[df["Country"].isin(selected_countries)].copy()
 base = base[base["Group"].notna()]
+base = base[(base["Date"].dt.date >= start_date) & (base["Date"].dt.date <= end_date)]
 
 # Portfolio-name-based Vizari exclusion (above) only catches portfolios literally
 # named "Vizari" — but Vizari-branded SKUs can run under ANY FBA portfolio
@@ -212,7 +237,7 @@ except ValueError:
     _n_vizari_dropped = 0  # No SKU column in this report; portfolio-name exclusion still applies.
 
 if base.empty:
-    st.warning("No FBA-prefixed portfolio data found for the selected country/countries.")
+    st.warning("No FBA-prefixed portfolio data found for the selected country/countries/date range.")
     st.stop()
 
 if _n_vizari_dropped > 0:
@@ -251,6 +276,47 @@ def build_totals_row(table: pd.DataFrame) -> pd.DataFrame:
     totals["CTR %"] = (totals["Clicks"] / totals["Impressions"] * 100).round(2).fillna(0)
     return totals[["Impressions", "Clicks", "CTR %", "Spend", "Sales", "ACOS %", "ROAS"]]
 
+# ACOS: <=5% is flat green (good); above 5% grades from pale to deep red as it worsens.
+# ROAS: always graded red, but inverted — low ROAS (bad) is deep red, high ROAS (good) is pale.
+ACOS_GOOD_THRESHOLD = 5.0
+COLOR_GOOD_GREEN = (200, 230, 201)   # flat green for ACOS <= threshold
+COLOR_RED_LOW = (255, 245, 245)      # near-white pale red (low intensity)
+COLOR_RED_HIGH = (198, 40, 40)       # medium-dark red (high intensity, kept readable)
+
+def _interp_style(c0, c1, t):
+    t = max(0.0, min(1.0, t))
+    r = int(c0[0] + (c1[0] - c0[0]) * t)
+    g = int(c0[1] + (c1[1] - c0[1]) * t)
+    b = int(c0[2] + (c1[2] - c0[2]) * t)
+    return f"background-color: rgb({r},{g},{b})"
+
+def _style_acos_column(series: pd.Series):
+    above = series[series > ACOS_GOOD_THRESHOLD]
+    max_val = above.max() if not above.empty else ACOS_GOOD_THRESHOLD + 1
+    styles = []
+    for v in series:
+        if pd.isna(v):
+            styles.append("")
+        elif v <= ACOS_GOOD_THRESHOLD:
+            styles.append(f"background-color: rgb{COLOR_GOOD_GREEN}")
+        else:
+            t = (v - ACOS_GOOD_THRESHOLD) / (max_val - ACOS_GOOD_THRESHOLD) if max_val > ACOS_GOOD_THRESHOLD else 1.0
+            styles.append(_interp_style(COLOR_RED_LOW, COLOR_RED_HIGH, t))
+    return styles
+
+def _style_roas_column(series: pd.Series):
+    vmin, vmax = series.min(), series.max()
+    rng = (vmax - vmin) or 1.0
+    styles = []
+    for v in series:
+        if pd.isna(v):
+            styles.append("")
+        else:
+            t = (v - vmin) / rng          # 0 = worst (lowest ROAS), 1 = best (highest ROAS)
+            intensity = 1.0 - t           # low ROAS -> intense red, high ROAS -> pale red
+            styles.append(_interp_style(COLOR_RED_LOW, COLOR_RED_HIGH, intensity))
+    return styles
+
 def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", height=None):
     """Interactive, sortable (click any column header) table. Optionally
     height-constrained for a scrollable view when there are many rows."""
@@ -269,7 +335,6 @@ def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", heigh
     }
 
     is_total = d[first_col_label] == "TOTAL"
-    non_total_idx = d.index[~is_total]
 
     def highlight_total(row):
         return [f"font-weight:700; background-color:{COLOR_MUTED}" if row[first_col_label] == "TOTAL" else "" for _ in row]
@@ -277,8 +342,8 @@ def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", heigh
     styled = (
         d.style
         .format(fmt)
-        .background_gradient(subset=pd.IndexSlice[non_total_idx, ["ACOS %"]], cmap="Reds", low=0.0, high=0.45)
-        .background_gradient(subset=pd.IndexSlice[non_total_idx, ["ROAS"]], cmap="Reds", low=0.0, high=0.45)
+        .apply(_style_acos_column, subset=["ACOS %"])
+        .apply(_style_roas_column, subset=["ROAS"])
         .apply(highlight_total, axis=1)
     )
     kwargs = dict(use_container_width=True, hide_index=True)
@@ -519,7 +584,7 @@ with tab_group:
             styled_weekly = (
                 weekly_display.style
                 .format({"Spend": "${:,.2f}", "Sales": "${:,.2f}", "ACOS %": "{:.2f}%"})
-                .background_gradient(subset=["ACOS %"], cmap="Reds", low=0.0, high=0.45)
+                .apply(_style_acos_column, subset=["ACOS %"])
             )
             st.dataframe(styled_weekly, use_container_width=True, hide_index=True)
 
@@ -746,4 +811,3 @@ with tab_campaign:
             "Campaign grouping rule: exact Campaign Name from the report. "
             "Scoped to FBA-prefixed portfolios, excluding any 'Vizari' portfolios."
         )
-

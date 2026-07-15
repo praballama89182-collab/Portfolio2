@@ -231,9 +231,9 @@ def build_metrics_table(data: pd.DataFrame, group_col: str, order=None) -> pd.Da
     if order is not None:
         agg = agg.reindex(order).fillna(0)
 
-    agg["ACOS %"] = (agg["Spend"] / agg["Sales"].replace(0, np.nan) * 100).round(2)
-    agg["ROAS"] = (agg["Sales"] / agg["Spend"].replace(0, np.nan)).round(2)
-    agg["CTR %"] = (agg["Clicks"] / agg["Impressions"].replace(0, np.nan) * 100).round(2)
+    agg["ACOS %"] = (agg["Spend"] / agg["Sales"].replace(0, np.nan) * 100).round(2).fillna(0)
+    agg["ROAS"] = (agg["Sales"] / agg["Spend"].replace(0, np.nan)).round(2).fillna(0)
+    agg["CTR %"] = (agg["Clicks"] / agg["Impressions"].replace(0, np.nan) * 100).round(2).fillna(0)
     agg["Spend"] = agg["Spend"].round(2)
     agg["Sales"] = agg["Sales"].round(2)
 
@@ -246,9 +246,9 @@ def build_totals_row(table: pd.DataFrame) -> pd.DataFrame:
         "Spend": [table["Spend"].sum()],
         "Sales": [table["Sales"].sum()],
     }, index=["TOTAL"])
-    totals["ACOS %"] = (totals["Spend"] / totals["Sales"] * 100).round(2)
-    totals["ROAS"] = (totals["Sales"] / totals["Spend"]).round(2)
-    totals["CTR %"] = (totals["Clicks"] / totals["Impressions"] * 100).round(2)
+    totals["ACOS %"] = (totals["Spend"] / totals["Sales"] * 100).round(2).fillna(0)
+    totals["ROAS"] = (totals["Sales"] / totals["Spend"]).round(2).fillna(0)
+    totals["CTR %"] = (totals["Clicks"] / totals["Impressions"] * 100).round(2).fillna(0)
     return totals[["Impressions", "Clicks", "CTR %", "Spend", "Sales", "ACOS %", "ROAS"]]
 
 def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", height=None):
@@ -277,8 +277,8 @@ def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", heigh
     styled = (
         d.style
         .format(fmt)
-        .background_gradient(subset=pd.IndexSlice[non_total_idx, ["ACOS %"]], cmap="Blues", low=0.0, high=0.55)
-        .background_gradient(subset=pd.IndexSlice[non_total_idx, ["ROAS"]], cmap="Blues", low=0.0, high=0.55)
+        .background_gradient(subset=pd.IndexSlice[non_total_idx, ["ACOS %"]], cmap="Reds", low=0.0, high=0.45)
+        .background_gradient(subset=pd.IndexSlice[non_total_idx, ["ROAS"]], cmap="Reds", low=0.0, high=0.45)
         .apply(highlight_total, axis=1)
     )
     kwargs = dict(use_container_width=True, hide_index=True)
@@ -481,7 +481,7 @@ with tab_group:
             .rename(columns={"Date": "Day"})
             .sort_values("Day")
         )
-        daily["ACOS %"] = (daily["Spend"] / daily["Sales"].replace(0, np.nan) * 100).round(2)
+        daily["ACOS %"] = (daily["Spend"] / daily["Sales"].replace(0, np.nan) * 100).round(2).fillna(0)
         daily["Day"] = pd.to_datetime(daily["Day"])
 
         fig_daily = combo_chart(
@@ -505,7 +505,7 @@ with tab_group:
         )
         weekly["order"] = weekly["Week"].str.extract(r"(\d+)").astype(int)
         weekly = weekly.sort_values("order").drop(columns="order").reset_index(drop=True)
-        weekly["ACOS %"] = (weekly["Spend"] / weekly["Sales"].replace(0, np.nan) * 100).round(2)
+        weekly["ACOS %"] = (weekly["Spend"] / weekly["Sales"].replace(0, np.nan) * 100).round(2).fillna(0)
 
         fig_weekly = combo_chart(
             x=weekly["Week"], spend=weekly["Spend"], sales=weekly["Sales"], acos=weekly["ACOS %"],
@@ -519,7 +519,7 @@ with tab_group:
             styled_weekly = (
                 weekly_display.style
                 .format({"Spend": "${:,.2f}", "Sales": "${:,.2f}", "ACOS %": "{:.2f}%"})
-                .background_gradient(subset=["ACOS %"], cmap="Blues", low=0.0, high=0.55)
+                .background_gradient(subset=["ACOS %"], cmap="Reds", low=0.0, high=0.45)
             )
             st.dataframe(styled_weekly, use_container_width=True, hide_index=True)
 

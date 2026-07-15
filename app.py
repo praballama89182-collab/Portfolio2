@@ -430,7 +430,9 @@ def combo_chart(x, spend, sales, acos, title, x_title, x_type="category", ranges
 # =================================================================
 # Tabs: Portfolio Group  |  Vendor / Brand
 # =================================================================
-tab_group, tab_brand, tab_campaign = st.tabs(["📁 Portfolio Group", "🏷️ Vendor / Brand", "📣 Campaign Overview"])
+tab_group, tab_brand, tab_campaign, tab_drill = st.tabs([
+    "📁 Portfolio Group", "🏷️ Vendor / Brand", "📣 Campaign Overview", "🔎 Brand → Campaign Drilldown"
+])
 
 # =================================================================
 # TAB 1 — Portfolio Group (existing behaviour)
@@ -810,5 +812,76 @@ with tab_campaign:
 
         st.caption(
             "Campaign grouping rule: exact Campaign Name from the report. "
+            "Scoped to FBA-prefixed portfolios, excluding any 'Vizari' portfolios."
+        )
+
+# =================================================================
+# TAB 4 — Brand → Campaign Drilldown
+# (click a brand to expand and see only the campaigns it ran in, with
+# metrics scoped strictly to that brand's SKU rows — other brands' SKUs
+# that might share the same campaign/ad group are excluded)
+# =================================================================
+with tab_drill:
+    SKU_CANDIDATES = ["Advertised SKU", "SKU"]
+    CAMPAIGN_CANDIDATES = ["Campaign Name", "Campaign"]
+
+    try:
+        sku_col_d = resolve_column(base, SKU_CANDIDATES, "Advertised SKU")
+        campaign_col_d = resolve_column(base, CAMPAIGN_CANDIDATES, "Campaign Name")
+    except ValueError as e:
+        st.error(f"Missing required column: {e}")
+    else:
+        drill_df = base.copy()
+        drill_df["Brand"] = drill_df[sku_col_d].astype(str).str.strip().str[:4].str.upper()
+        drill_df.loc[drill_df[sku_col_d].isna() | (drill_df[sku_col_d].astype(str).str.strip() == ""), "Brand"] = np.nan
+        drill_df["Campaign"] = drill_df[campaign_col_d].astype(str).str.strip()
+        drill_matched = drill_df[drill_df["Brand"].notna()]
+
+        st.subheader(f"Brand → Campaign Drilldown — {', '.join(selected_countries)} | {start_date} to {end_date}")
+        st.caption(
+            "Click a brand below to expand it and see only the campaigns where that brand's SKUs ran — "
+            "each campaign's numbers reflect only that brand's SKU rows, not other brands sharing the same campaign or ad group."
+        )
+
+        brand_level = build_metrics_table(drill_matched, "Brand").sort_values("Sales", ascending=False)
+
+        drill_search = st.text_input(
+            "🔍 Search brand",
+            placeholder="Type a brand, e.g. VIZA",
+            key="drill_search_box",
+        ).strip()
+
+        if drill_search:
+            brand_level_filtered = brand_level[brand_level.index.str.contains(drill_search, case=False, na=False)]
+        else:
+            brand_level_filtered = brand_level
+
+        if brand_level_filtered.empty:
+            st.info(f"No brands match '{drill_search}'.")
+        else:
+            st.caption(
+                f"Showing {len(brand_level_filtered)} of {len(brand_level)} brands, sorted by Sales. "
+                "Search to narrow this down if you have many brands — each expander below renders its own table."
+            )
+
+            # Compute Brand x Campaign metrics once, then slice per brand — much faster
+            # than re-filtering and re-aggregating inside every expander.
+            bc_table = build_metrics_table(drill_matched, ["Brand", "Campaign"])
+
+            for brand in brand_level_filtered.index:
+                row = brand_level_filtered.loc[brand]
+                header = (
+                    f"{brand}  —  Spend {human_format(row['Spend'], prefix='$')} · "
+                    f"Sales {human_format(row['Sales'], prefix='$')} · "
+                    f"ACOS {row['ACOS %']:.2f}% · ROAS {row['ROAS']:.2f}"
+                )
+                with st.expander(header):
+                    campaigns_for_brand = bc_table.xs(brand, level="Brand").sort_values("Sales", ascending=False)
+                    st.caption(f"{len(campaigns_for_brand)} campaign(s) ran {brand} SKUs. Click any column header to sort.")
+                    table_height = 420 if len(campaigns_for_brand) > 8 else None
+                    show_metrics_table(campaigns_for_brand, first_col_label="Campaign", height=table_height)
+
+        st.caption(
+            "Brand grouping rule: first 4 characters of the Advertised SKU, uppercased. "
             "Scoped to FBA-prefixed portfolios, excluding any 'Vizari' portfolios."
         )

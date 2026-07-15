@@ -116,9 +116,11 @@ SPEND_CANDIDATES = ["Spend - converted", "Spend"]
 SALES_CANDIDATES = ["7 Day Total Sales - converted", "7 Day Total Sales"]
 
 def resolve_column(df: pd.DataFrame, candidates: list[str], label: str) -> str:
-    for c in candidates:
-        if c in df.columns:
-            return c
+    lookup = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in lookup:
+            return lookup[key]
     raise ValueError(f"Missing expected column for {label}: tried {candidates}")
 
 @st.cache_data
@@ -543,8 +545,8 @@ with tab_brand:
         "Upload an ASIN → Brand mapping file to break these metrics out by brand."
     )
 
-    ASIN_CANDIDATES = ["ASIN", "Advertised ASIN"]
-    BRAND_CANDIDATES = ["Brand", "Prefix", "Brand Prefix"]
+    ASIN_CANDIDATES = ["ASIN", "Advertised ASIN", "Product ASIN", "Asin"]
+    BRAND_CANDIDATES = ["Brand", "Prefix", "Brand Prefix", "Brand/Prefix", "Vendor", "Vendor Name", "Brand Name", "Brand Code"]
 
     mapping_file = st.file_uploader(
         "Upload ASIN → Brand mapping (.csv or .xlsx, columns: Prefix/Brand + ASIN)",
@@ -566,8 +568,45 @@ with tab_brand:
                 m = pd.read_excel(file)
             m.columns = [str(c).strip() for c in m.columns]
 
-            asin_col = resolve_column(m, ASIN_CANDIDATES, "ASIN")
-            brand_col = resolve_column(m, BRAND_CANDIDATES, "Brand/Prefix")
+            # Try matching by header name first (case-insensitive).
+            try:
+                asin_col = resolve_column(m, ASIN_CANDIDATES, "ASIN")
+            except ValueError:
+                asin_col = None
+            try:
+                brand_col = resolve_column(m, BRAND_CANDIDATES, "Brand/Prefix")
+            except ValueError:
+                brand_col = None
+
+            # Fallback: if the header names don't match anything we expect,
+            # auto-detect by content. Real ASINs are 10 chars, mostly
+            # uppercase letters/digits starting with B (e.g. B0002D0CGM).
+            if asin_col is None or brand_col is None:
+                asin_pattern = m.apply(
+                    lambda col: col.astype(str).str.strip().str.match(r"^B[0-9A-Z]{9}$").mean()
+                    if col.dtype == object or pd.api.types.is_string_dtype(col) else 0.0
+                )
+                likely_asin_col = asin_pattern.idxmax() if asin_pattern.max() > 0.5 else None
+                remaining_cols = [c for c in m.columns if c != likely_asin_col]
+
+                if asin_col is None and likely_asin_col is not None:
+                    asin_col = likely_asin_col
+                if brand_col is None:
+                    # Use the other column if there are exactly two columns total;
+                    # otherwise take the first remaining non-ASIN column.
+                    candidates_left = [c for c in remaining_cols if c != asin_col]
+                    if len(m.columns) == 2 and candidates_left:
+                        brand_col = candidates_left[0]
+                    elif candidates_left:
+                        brand_col = candidates_left[0]
+
+            if asin_col is None or brand_col is None:
+                found = list(m.columns)
+                raise ValueError(
+                    f"Could not identify ASIN and Brand columns automatically. "
+                    f"Columns found in file: {found}. Please make sure one column is named "
+                    f"'ASIN' and the other 'Brand' or 'Prefix' (or similar)."
+                )
 
             m = m[[brand_col, asin_col]].rename(columns={brand_col: "Brand", asin_col: "ASIN"})
             m["ASIN"] = m["ASIN"].astype(str).str.strip()

@@ -281,7 +281,8 @@ def build_totals_row(table: pd.DataFrame) -> pd.DataFrame:
 ACOS_GOOD_THRESHOLD = 5.0
 COLOR_GOOD_GREEN = (200, 230, 201)   # flat green for ACOS <= threshold
 COLOR_RED_LOW = (255, 245, 245)      # near-white pale red (low intensity)
-COLOR_RED_HIGH = (198, 40, 40)       # medium-dark red (high intensity, kept readable)
+COLOR_RED_HIGH = (198, 40, 40)       # medium-dark red for ACOS (high intensity, kept readable)
+COLOR_ROAS_RED_HIGH = (239, 154, 154)  # lighter red ceiling for ROAS — stays soft even at its worst
 
 def _interp_style(c0, c1, t):
     t = max(0.0, min(1.0, t))
@@ -313,8 +314,8 @@ def _style_roas_column(series: pd.Series):
             styles.append("")
         else:
             t = (v - vmin) / rng          # 0 = worst (lowest ROAS), 1 = best (highest ROAS)
-            intensity = 1.0 - t           # low ROAS -> intense red, high ROAS -> pale red
-            styles.append(_interp_style(COLOR_RED_LOW, COLOR_RED_HIGH, intensity))
+            intensity = 1.0 - t           # low ROAS -> more red, high ROAS -> pale red
+            styles.append(_interp_style(COLOR_RED_LOW, COLOR_ROAS_RED_HIGH, intensity))
     return styles
 
 def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", height=None):

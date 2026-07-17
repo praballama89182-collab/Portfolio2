@@ -24,6 +24,7 @@ GROUP_COLORS = {
     "CBT": COLOR_MUTED,
     "Exclusive": COLOR_ACCENT,
     "Ageing": COLOR_PRIMARY,
+    "MAP": "#5B9BF7",         # distinct mid-blue, not reused elsewhere in the palette
     "FBA": "#0B3D91",         # navy blue — clearly blue, not near-black/grey
 }
 
@@ -152,7 +153,7 @@ except Exception as e:
 # Portfolio grouping logic
 # =================================================================
 def classify_portfolio(portfolio):
-    """Bucket FBA-prefixed portfolios into CBT / Exclusive / Ageing / FBA (remaining).
+    """Bucket FBA-prefixed portfolios into CBT / Exclusive / Ageing / MAP / FBA (remaining).
     Non-FBA portfolios are excluded (returns None). Vizari portfolios are excluded
     even if FBA-prefixed, per standing business rule."""
     if pd.isna(portfolio):
@@ -169,11 +170,13 @@ def classify_portfolio(portfolio):
         return "Exclusive"
     if "LTSF" in pu or "AGEING" in pu or "AGING" in pu:
         return "Ageing"
+    if "MAP" in pu:
+        return "MAP"
     return "FBA"
 
 df["Group"] = df["Portfolio name"].apply(classify_portfolio)
 
-GROUP_ORDER = ["CBT", "Exclusive", "Ageing", "FBA"]
+GROUP_ORDER = ["CBT", "Exclusive", "Ageing", "MAP", "FBA"]
 
 # =================================================================
 # Sidebar controls (shared across tabs)
@@ -215,11 +218,27 @@ if start_date > end_date:
     st.sidebar.error("Start date must be before end date.")
     st.stop()
 
+# ---- Portfolio filter (choose specific portfolios within the FBA/non-Vizari scope) ----
+portfolios_available = sorted(df.loc[df["Group"].notna(), "Portfolio name"].dropna().unique().tolist())
+
+selected_portfolios = st.sidebar.multiselect(
+    "Portfolio",
+    options=portfolios_available,
+    default=portfolios_available,
+    help="Narrow down to specific portfolios — applies everywhere, including the Brand → Campaign "
+         "Drilldown tab. Defaults to all FBA-prefixed, non-Vizari portfolios.",
+)
+
+if not selected_portfolios:
+    st.warning("Select at least one portfolio from the sidebar.")
+    st.stop()
+
 # =================================================================
 # Base filtered dataset (FBA-classified rows, selected countries, selected date range)
 # =================================================================
 base = df[df["Country"].isin(selected_countries)].copy()
 base = base[base["Group"].notna()]
+base = base[base["Portfolio name"].isin(selected_portfolios)]
 base = base[(base["Date"].dt.date >= start_date) & (base["Date"].dt.date <= end_date)]
 
 # Portfolio-name-based Vizari exclusion (above) only catches portfolios literally
@@ -518,7 +537,7 @@ with tab_group:
 
     st.caption(
         "Grouping rule: only portfolios whose name starts with 'FBA' are included, excluding any 'Vizari' portfolios. "
-        "Names containing 'CBT' → CBT, 'Exclusive' → Exclusive, 'LTSF'/'Ageing' → Ageing, "
+        "Names containing 'CBT' → CBT, 'Exclusive' → Exclusive, 'LTSF'/'Ageing' → Ageing, 'MAP' → MAP, "
         "all remaining FBA-prefixed portfolios → FBA."
     )
 

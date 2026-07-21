@@ -150,20 +150,54 @@ except Exception as e:
     st.stop()
 
 # =================================================================
-# Portfolio grouping logic
+# Currency handling — the qualifying currency symbol follows whichever
+# country/countries are selected in the sidebar (US = $, Canada = C$,
+# Mexico = MX$). If countries with different currencies are selected
+# together, mixing their raw Spend/Sales numbers into one total is not
+# financially meaningful (no FX conversion happens anywhere in this app),
+# so that case is flagged explicitly rather than silently showing a
+# misleading single currency symbol.
 # =================================================================
-def classify_portfolio(portfolio):
-    """Bucket FBA-prefixed portfolios into CBT / Exclusive / Ageing / MAP / FBA (remaining).
-    Non-FBA portfolios are excluded (returns None). Vizari portfolios are excluded
-    even if FBA-prefixed, per standing business rule."""
+CURRENCY_MAP = {
+    "united states": {"symbol": "$", "code": "USD"},
+    "us": {"symbol": "$", "code": "USD"},
+    "usa": {"symbol": "$", "code": "USD"},
+    "canada": {"symbol": "C$", "code": "CAD"},
+    "ca": {"symbol": "C$", "code": "CAD"},
+    "mexico": {"symbol": "MX$", "code": "MXN"},
+    "mx": {"symbol": "MX$", "code": "MXN"},
+}
+DEFAULT_CURRENCY = {"symbol": "$", "code": ""}
+
+def currency_for(country_name) -> dict:
+    return CURRENCY_MAP.get(str(country_name).strip().lower(), DEFAULT_CURRENCY)
+
+# =================================================================
+# Portfolio grouping logic — country-aware
+# =================================================================
+# The qualifying-name convention differs by marketplace: most countries
+# (including Canada) use "FBA" in the portfolio name; Mexico uses "NARF"
+# instead. Any portfolio containing "VIZ" (catches VIZARI, VIZA, and any
+# other Viz-prefixed variant) is excluded everywhere, regardless of country
+# or whether it also contains the qualifying prefix for that country.
+def classify_portfolio(portfolio, country=None):
+    """Bucket qualifying portfolios into CBT / Exclusive / Ageing / MAP / FBA (remaining).
+    Non-qualifying portfolios are excluded (returns None). The qualifying-name
+    requirement is country-specific: 'FBA' for most countries, 'NARF' for Mexico.
+    Vizari-branded portfolios are excluded everywhere regardless of country."""
     if pd.isna(portfolio):
         return None
     p = str(portfolio).strip()
     pu = p.upper()
-    if not pu.startswith("FBA"):
+    country_str = str(country).strip().lower() if country is not None else ""
+
+    if "VIZ" in pu:
         return None
-    if "VIZARI" in pu:
+
+    required = "NARF" if country_str in ("mexico", "mx") else "FBA"
+    if required not in pu:
         return None
+
     if "CBT" in pu:
         return "CBT"
     if "EXCLUSIVE" in pu:
@@ -174,7 +208,10 @@ def classify_portfolio(portfolio):
         return "MAP"
     return "FBA"
 
-df["Group"] = df["Portfolio name"].apply(classify_portfolio)
+# Applied per-row so the qualifying-name rule and resulting Group correctly
+# reflect each row's own Country — this is what makes the portfolio list and
+# every downstream metric reshuffle correctly when the country filter changes.
+df["Group"] = df.apply(lambda r: classify_portfolio(r["Portfolio name"], r["Country"]), axis=1)
 
 GROUP_ORDER = ["CBT", "Exclusive", "Ageing", "MAP", "FBA"]
 
@@ -193,6 +230,33 @@ selected_countries = st.sidebar.multiselect(
 if not selected_countries:
     st.warning("Select at least one country from the sidebar.")
     st.stop()
+
+# ---- Resolve currency for the current country selection ----
+# NOTE: Streamlit's markdown renderer treats a PAIR of literal "$" characters
+# within the same plain-text call (st.caption/st.warning/st.markdown without
+# unsafe_allow_html/expander labels) as LaTeX math-mode delimiters, which
+# silently drops/mangles whatever sits between them. currency_symbol (raw) is
+# safe to use inside raw-HTML blocks (unsafe_allow_html=True), Styler.format()
+# strings, and Plotly chart labels — none of those go through that markdown
+# math parser. currency_symbol_md is the backslash-escaped version, used only
+# in plain-markdown text where two or more currency mentions might land in the
+# same call.
+distinct_currency_codes = {currency_for(c)["code"] or currency_for(c)["symbol"] for c in selected_countries}
+if len(distinct_currency_codes) == 1:
+    currency_symbol = currency_for(selected_countries[0])["symbol"]
+    currency_code = currency_for(selected_countries[0])["code"]
+    st.sidebar.caption(f"💱 Currency: {currency_code or currency_symbol} ({currency_symbol})")
+else:
+    currency_symbol = ""
+    currency_code = "MIXED"
+    mix_detail = ", ".join(f"{c} = {currency_for(c)['symbol'].replace('$', chr(92) + '$')}" for c in selected_countries)
+    st.sidebar.warning(
+        f"⚠️ Selected countries use different currencies ({mix_detail}). This app doesn't convert "
+        f"between currencies, so combined totals below are unconverted mixed-currency sums — not "
+        f"directly comparable. Select one country (or only same-currency countries) for accurate totals."
+    )
+
+currency_symbol_md = currency_symbol.replace("$", "\\$")
 
 # ---- Date range filter (custom start/end) ----
 min_date_available = df["Date"].min().date()
@@ -218,15 +282,23 @@ if start_date > end_date:
     st.sidebar.error("Start date must be before end date.")
     st.stop()
 
-# ---- Portfolio filter (choose specific portfolios within the FBA/non-Vizari scope) ----
-portfolios_available = sorted(df.loc[df["Group"].notna(), "Portfolio name"].dropna().unique().tolist())
+# ---- Portfolio filter (choose specific portfolios within the qualifying/non-Vizari scope) ----
+# Recomputed from df scoped to the selected countries first, since the qualifying
+# portfolio *names* themselves differ by country (FBA_... vs NARF_...) — the
+# available options in this multiselect will correctly reshuffle when the
+# country selection changes.
+portfolios_available = sorted(
+    df.loc[df["Country"].isin(selected_countries) & df["Group"].notna(), "Portfolio name"]
+    .dropna().unique().tolist()
+)
 
 selected_portfolios = st.sidebar.multiselect(
     "Portfolio",
     options=portfolios_available,
     default=portfolios_available,
     help="Narrow down to specific portfolios — applies everywhere, including the Brand → Campaign "
-         "Drilldown tab. Defaults to all FBA-prefixed, non-Vizari portfolios.",
+         "Drilldown tab. Defaults to all qualifying, non-Vizari portfolios for the selected "
+         "country/countries (FBA-named for most countries, NARF-named for Mexico).",
 )
 
 if not selected_portfolios:
@@ -234,7 +306,7 @@ if not selected_portfolios:
     st.stop()
 
 # =================================================================
-# Base filtered dataset (FBA-classified rows, selected countries, selected date range)
+# Base filtered dataset (qualifying-classified rows, selected countries, selected date range)
 # =================================================================
 base = df[df["Country"].isin(selected_countries)].copy()
 base = base[base["Group"].notna()]
@@ -242,9 +314,10 @@ base = base[base["Portfolio name"].isin(selected_portfolios)]
 base = base[(base["Date"].dt.date >= start_date) & (base["Date"].dt.date <= end_date)]
 
 # Portfolio-name-based Vizari exclusion (above) only catches portfolios literally
-# named "Vizari" — but Vizari-branded SKUs can run under ANY FBA portfolio
-# (e.g. a generic "FBA_Prime Day" portfolio). So also exclude by SKU brand code
-# (VIZA) directly, applied once here so every tab inherits the same clean scope.
+# named with "VIZ" — but Vizari-branded SKUs can run under ANY qualifying portfolio
+# (e.g. a generic "FBA_Prime Day" or "NARF_Prime Day" portfolio). So also exclude by
+# SKU brand code (VIZA) directly, applied once here so every tab inherits the same
+# clean scope, for every country.
 VIZARI_SKU_PREFIXES = {"VIZA"}
 try:
     _sku_col_check = resolve_column(base, ["Advertised SKU", "SKU"], "Advertised SKU")
@@ -256,7 +329,7 @@ except ValueError:
     _n_vizari_dropped = 0  # No SKU column in this report; portfolio-name exclusion still applies.
 
 if base.empty:
-    st.warning("No FBA-prefixed portfolio data found for the selected country/countries/date range.")
+    st.warning("No qualifying portfolio data found for the selected country/countries/date range.")
     st.stop()
 
 if _n_vizari_dropped > 0:
@@ -265,7 +338,7 @@ if _n_vizari_dropped > 0:
 # =================================================================
 # Generic, reusable metrics-table builder (works for Group or Brand)
 # =================================================================
-def build_metrics_table(data: pd.DataFrame, group_col: str, order=None) -> pd.DataFrame:
+def build_metrics_table(data: pd.DataFrame, group_col, order=None) -> pd.DataFrame:
     agg = data.groupby(group_col).agg(
         Impressions=("Impressions", "sum"),
         Clicks=("Clicks", "sum"),
@@ -337,9 +410,10 @@ def _style_roas_column(series: pd.Series):
             styles.append(_interp_style(COLOR_RED_LOW, COLOR_ROAS_RED_HIGH, intensity))
     return styles
 
-def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", height=None):
+def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", height=None, currency: str = "$"):
     """Interactive, sortable (click any column header) table. Optionally
-    height-constrained for a scrollable view when there are many rows."""
+    height-constrained for a scrollable view when there are many rows.
+    `currency` is the currency symbol/prefix used for Spend and Sales."""
     d = data.copy()
     d.index.name = "__key__"
     d = d.reset_index().rename(columns={"__key__": first_col_label})
@@ -348,8 +422,8 @@ def show_metrics_table(data: pd.DataFrame, first_col_label: str = "Group", heigh
         "Impressions": "{:,.0f}",
         "Clicks": "{:,.0f}",
         "CTR %": "{:.2f}%",
-        "Spend": "${:,.2f}",
-        "Sales": "${:,.2f}",
+        "Spend": f"{currency}{{:,.2f}}",
+        "Sales": f"{currency}{{:,.2f}}",
         "ACOS %": "{:.2f}%",
         "ROAS": "{:.2f}",
     }
@@ -409,7 +483,7 @@ def contribution_pie(labels, values, colors, title, value_prefix=""):
     )
     return fig
 
-def combo_chart(x, spend, sales, acos, title, x_title, x_type="category", rangeslider=False):
+def combo_chart(x, spend, sales, acos, title, x_title, x_type="category", rangeslider=False, currency="$"):
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
         go.Bar(x=x, y=spend, name="Spend", marker_color=COLOR_SPEND, opacity=0.9),
@@ -440,9 +514,8 @@ def combo_chart(x, spend, sales, acos, title, x_title, x_type="category", ranges
         font=dict(size=13, color=COLOR_DARK, family="Segoe UI, sans-serif"),
     )
     fig.update_xaxes(title_text=f"<b>{x_title}</b>", type=x_type)
-    if rangeslider:
-        fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.08, bgcolor=COLOR_MUTED))
-    fig.update_yaxes(title_text="<b>Amount ($)</b>", secondary_y=False, tickformat="~s")
+    amount_label = f"Amount ({currency})" if currency else "Amount"
+    fig.update_yaxes(title_text=f"<b>{amount_label}</b>", secondary_y=False, tickformat="~s")
     fig.update_yaxes(title_text="<b>ACOS (%)</b>", secondary_y=True, showgrid=False)
     return fig
 
@@ -466,8 +539,8 @@ with tab_group:
     kpis = [
         ("IMPRESSIONS", human_format(t['Impressions']), f"{t['Impressions']:,.0f}", COLOR_SPEND),
         ("CLICKS", human_format(t['Clicks']), f"{t['Clicks']:,.0f}", COLOR_SPEND),
-        ("SPEND", human_format(t['Spend'], prefix="$"), f"${t['Spend']:,.2f}", COLOR_SPEND),
-        ("SALES", human_format(t['Sales'], prefix="$"), f"${t['Sales']:,.2f}", COLOR_SALES),
+        ("SPEND", human_format(t['Spend'], prefix=currency_symbol), f"{currency_symbol}{t['Spend']:,.2f}", COLOR_SPEND),
+        ("SALES", human_format(t['Sales'], prefix=currency_symbol), f"{currency_symbol}{t['Sales']:,.2f}", COLOR_SALES),
         ("ACOS", f"{t['ACOS %']:.2f}%", f"{t['ACOS %']:.2f}%", COLOR_ACOS),
         ("ROAS", f"{t['ROAS']:.2f}", f"{t['ROAS']:.2f}", COLOR_ROAS),
     ]
@@ -486,14 +559,15 @@ with tab_group:
     st.write("")
     st.subheader("Metrics by Portfolio Group")
     st.caption("Click any column header to sort ascending/descending. (Totals shown in the cards above — not included in this table so sorting isn't skewed by them.)")
-    show_metrics_table(table, first_col_label="Group")
+    show_metrics_table(table, first_col_label="Group", currency=currency_symbol)
 
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("<b style='font-size:16px;'>Spend by Group</b>", unsafe_allow_html=True)
         fig = bar_chart(
             table.index, table["Spend"], [GROUP_COLORS[g] for g in table.index],
-            "Spend ($)", lambda v: human_format(v, prefix="$"),
+            f"Spend ({currency_symbol})" if currency_symbol else "Spend",
+            lambda v: human_format(v, prefix=currency_symbol),
         )
         st.plotly_chart(fig, use_container_width=True)
     with col2:
@@ -510,12 +584,12 @@ with tab_group:
     pcol1, pcol2, pcol3 = st.columns(3)
     with pcol1:
         st.plotly_chart(
-            contribution_pie(table.index, table["Spend"], [GROUP_COLORS[g] for g in table.index], "Spend Contribution", "$"),
+            contribution_pie(table.index, table["Spend"], [GROUP_COLORS[g] for g in table.index], "Spend Contribution", currency_symbol),
             use_container_width=True,
         )
     with pcol2:
         st.plotly_chart(
-            contribution_pie(table.index, table["Sales"], [GROUP_COLORS[g] for g in table.index], "Sales Contribution", "$"),
+            contribution_pie(table.index, table["Sales"], [GROUP_COLORS[g] for g in table.index], "Sales Contribution", currency_symbol),
             use_container_width=True,
         )
     with pcol3:
@@ -536,9 +610,11 @@ with tab_group:
             st.markdown(f"**{g}** ({len(names)}): {', '.join(names) if names else '—'}")
 
     st.caption(
-        "Grouping rule: only portfolios whose name starts with 'FBA' are included, excluding any 'Vizari' portfolios. "
-        "Names containing 'CBT' → CBT, 'Exclusive' → Exclusive, 'LTSF'/'Ageing' → Ageing, 'MAP' → MAP, "
-        "all remaining FBA-prefixed portfolios → FBA."
+        "Grouping rule: qualifying portfolios must contain 'FBA' in the name (Mexico uses 'NARF' "
+        "instead), excluding any portfolio containing 'VIZ' (Vizari/Viza). Names containing 'CBT' → CBT, "
+        "'Exclusive' → Exclusive, 'LTSF'/'Ageing' → Ageing, 'MAP' → MAP, all remaining qualifying "
+        "portfolios → FBA. This rule is applied per-country, so the qualifying portfolio set and its "
+        "Group breakdown reshuffle to match whichever country/countries are selected above."
     )
 
     st.divider()
@@ -574,6 +650,7 @@ with tab_group:
         fig_daily = combo_chart(
             x=daily["Day"], spend=daily["Spend"], sales=daily["Sales"], acos=daily["ACOS %"],
             title="Daily Spend vs Sales vs ACOS", x_title="Date", x_type="date", rangeslider=True,
+            currency=currency_symbol,
         )
         st.plotly_chart(fig_daily, use_container_width=True)
 
@@ -597,7 +674,7 @@ with tab_group:
         fig_weekly = combo_chart(
             x=weekly["Week"], spend=weekly["Spend"], sales=weekly["Sales"], acos=weekly["ACOS %"],
             title="Weekly Spend vs Sales vs ACOS (Week 1–4 = 7-day blocks, Week 5 = Day 29+)",
-            x_title="Week",
+            x_title="Week", currency=currency_symbol,
         )
         st.plotly_chart(fig_weekly, use_container_width=True)
 
@@ -605,7 +682,7 @@ with tab_group:
             weekly_display = weekly.copy()
             styled_weekly = (
                 weekly_display.style
-                .format({"Spend": "${:,.2f}", "Sales": "${:,.2f}", "ACOS %": "{:.2f}%"})
+                .format({"Spend": f"{currency_symbol}{{:,.2f}}", "Sales": f"{currency_symbol}{{:,.2f}}", "ACOS %": "{:.2f}%"})
                 .apply(_style_acos_column, subset=["ACOS %"])
             )
             st.dataframe(styled_weekly, use_container_width=True, hide_index=True)
@@ -649,8 +726,8 @@ with tab_brand:
             ("BRANDS", f"{len(overall_table):,}", f"{len(overall_table):,}", COLOR_SPEND),
             ("IMPRESSIONS", human_format(ot['Impressions']), f"{ot['Impressions']:,.0f}", COLOR_SPEND),
             ("CLICKS", human_format(ot['Clicks']), f"{ot['Clicks']:,.0f}", COLOR_SPEND),
-            ("SPEND", human_format(ot['Spend'], prefix="$"), f"${ot['Spend']:,.2f}", COLOR_SPEND),
-            ("SALES", human_format(ot['Sales'], prefix="$"), f"${ot['Sales']:,.2f}", COLOR_SALES),
+            ("SPEND", human_format(ot['Spend'], prefix=currency_symbol), f"{currency_symbol}{ot['Spend']:,.2f}", COLOR_SPEND),
+            ("SALES", human_format(ot['Sales'], prefix=currency_symbol), f"{currency_symbol}{ot['Sales']:,.2f}", COLOR_SALES),
             ("ACOS", f"{ot['ACOS %']:.2f}%", f"{ot['ACOS %']:.2f}%", COLOR_ACOS),
             ("ROAS", f"{ot['ROAS']:.2f}", f"{ot['ROAS']:.2f}", COLOR_ROAS),
         ]
@@ -696,11 +773,11 @@ with tab_brand:
                 "(TOTAL is intentionally excluded from the table so it doesn't get caught up in sorting.)"
             )
             st.markdown(
-                f"**Totals for this view:** Spend {human_format(ft['Spend'], prefix='$')} · "
-                f"Sales {human_format(ft['Sales'], prefix='$')} · "
+                f"**Totals for this view:** Spend {human_format(ft['Spend'], prefix=currency_symbol_md)} · "
+                f"Sales {human_format(ft['Sales'], prefix=currency_symbol_md)} · "
                 f"ACOS {ft['ACOS %']:.2f}% · ROAS {ft['ROAS']:.2f}"
             )
-            show_metrics_table(filtered_table, first_col_label="Brand", height=520)
+            show_metrics_table(filtered_table, first_col_label="Brand", height=520, currency=currency_symbol)
 
         # ---- Charts: Top 10 by Sales (visual only, not a duplicate table) ----
         st.markdown("<br>", unsafe_allow_html=True)
@@ -714,14 +791,16 @@ with tab_brand:
             st.markdown("<b style='font-size:16px;'>Sales</b>", unsafe_allow_html=True)
             fig = bar_chart(
                 top10_table.index, top10_table["Sales"], top10_colors,
-                "Sales ($)", lambda v: human_format(v, prefix="$"),
+                f"Sales ({currency_symbol})" if currency_symbol else "Sales",
+                lambda v: human_format(v, prefix=currency_symbol),
             )
             st.plotly_chart(fig, use_container_width=True)
         with col2:
             st.markdown("<b style='font-size:16px;'>Spend</b>", unsafe_allow_html=True)
             fig = bar_chart(
                 top10_table.index, top10_table["Spend"], top10_colors,
-                "Spend ($)", lambda v: human_format(v, prefix="$"),
+                f"Spend ({currency_symbol})" if currency_symbol else "Spend",
+                lambda v: human_format(v, prefix=currency_symbol),
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -742,17 +821,18 @@ with tab_brand:
             st.plotly_chart(fig, use_container_width=True)
 
         st.plotly_chart(
-            contribution_pie(top10_table.index, top10_table["Sales"], top10_colors, "Sales Contribution (Top 10)", "$"),
+            contribution_pie(top10_table.index, top10_table["Sales"], top10_colors, "Sales Contribution (Top 10)", currency_symbol),
             use_container_width=True,
         )
 
         st.caption(
             "Brand grouping rule: first 4 characters of the Advertised SKU, uppercased. "
-            "Scoped to the same FBA-prefixed portfolios as the Portfolio Group tab, excluding any 'Vizari' portfolios."
+            "Scoped to the same qualifying portfolios as the Portfolio Group tab (FBA-named, or "
+            "NARF-named for Mexico), excluding any Vizari portfolios."
         )
 
 # =================================================================
-# TAB 3 — Campaign Overview  (same FBA-prefixed, non-Vizari scope)
+# TAB 3 — Campaign Overview  (same qualifying, non-Vizari scope)
 # =================================================================
 with tab_campaign:
     CAMPAIGN_CANDIDATES = ["Campaign Name", "Campaign"]
@@ -770,7 +850,8 @@ with tab_campaign:
 
         st.subheader(f"Campaign Overview — {', '.join(selected_countries)} | {start_date} to {end_date}")
         st.caption(
-            "Scoped to the same FBA-prefixed portfolios as the Portfolio Group tab, excluding any 'Vizari' portfolios."
+            "Scoped to the same qualifying portfolios as the Portfolio Group tab (FBA-named, or "
+            "NARF-named for Mexico), excluding any Vizari portfolios."
         )
 
         campaign_table = build_metrics_table(campaign_df, "Campaign").sort_values("Sales", ascending=False)
@@ -781,8 +862,8 @@ with tab_campaign:
             ("CAMPAIGNS", f"{len(campaign_table):,}", f"{len(campaign_table):,}", COLOR_SPEND),
             ("IMPRESSIONS", human_format(ct['Impressions']), f"{ct['Impressions']:,.0f}", COLOR_SPEND),
             ("CLICKS", human_format(ct['Clicks']), f"{ct['Clicks']:,.0f}", COLOR_SPEND),
-            ("SPEND", human_format(ct['Spend'], prefix="$"), f"${ct['Spend']:,.2f}", COLOR_SPEND),
-            ("SALES", human_format(ct['Sales'], prefix="$"), f"${ct['Sales']:,.2f}", COLOR_SALES),
+            ("SPEND", human_format(ct['Spend'], prefix=currency_symbol), f"{currency_symbol}{ct['Spend']:,.2f}", COLOR_SPEND),
+            ("SALES", human_format(ct['Sales'], prefix=currency_symbol), f"{currency_symbol}{ct['Sales']:,.2f}", COLOR_SALES),
             ("ACOS", f"{ct['ACOS %']:.2f}%", f"{ct['ACOS %']:.2f}%", COLOR_ACOS),
             ("ROAS", f"{ct['ROAS']:.2f}", f"{ct['ROAS']:.2f}", COLOR_ROAS),
         ]
@@ -823,15 +904,16 @@ with tab_campaign:
                 "(TOTAL is intentionally excluded from the table so it doesn't get caught up in sorting.)"
             )
             st.markdown(
-                f"**Totals for this view:** Spend {human_format(fct['Spend'], prefix='$')} · "
-                f"Sales {human_format(fct['Sales'], prefix='$')} · "
+                f"**Totals for this view:** Spend {human_format(fct['Spend'], prefix=currency_symbol_md)} · "
+                f"Sales {human_format(fct['Sales'], prefix=currency_symbol_md)} · "
                 f"ACOS {fct['ACOS %']:.2f}% · ROAS {fct['ROAS']:.2f}"
             )
-            show_metrics_table(filtered_campaigns, first_col_label="Campaign", height=520)
+            show_metrics_table(filtered_campaigns, first_col_label="Campaign", height=520, currency=currency_symbol)
 
         st.caption(
             "Campaign grouping rule: exact Campaign Name from the report. "
-            "Scoped to FBA-prefixed portfolios, excluding any 'Vizari' portfolios."
+            "Scoped to qualifying portfolios (FBA-named, or NARF-named for Mexico), excluding any "
+            "Vizari portfolios."
         )
 
 # =================================================================
@@ -890,17 +972,18 @@ with tab_drill:
             for brand in brand_level_filtered.index:
                 row = brand_level_filtered.loc[brand]
                 header = (
-                    f"{brand}  —  Spend {human_format(row['Spend'], prefix='$')} · "
-                    f"Sales {human_format(row['Sales'], prefix='$')} · "
+                    f"{brand}  —  Spend {human_format(row['Spend'], prefix=currency_symbol_md)} · "
+                    f"Sales {human_format(row['Sales'], prefix=currency_symbol_md)} · "
                     f"ACOS {row['ACOS %']:.2f}% · ROAS {row['ROAS']:.2f}"
                 )
                 with st.expander(header):
                     campaigns_for_brand = bc_table.xs(brand, level="Brand").sort_values("Sales", ascending=False)
                     st.caption(f"{len(campaigns_for_brand)} campaign(s) ran {brand} SKUs. Click any column header to sort.")
                     table_height = 420 if len(campaigns_for_brand) > 8 else None
-                    show_metrics_table(campaigns_for_brand, first_col_label="Campaign", height=table_height)
+                    show_metrics_table(campaigns_for_brand, first_col_label="Campaign", height=table_height, currency=currency_symbol)
 
         st.caption(
             "Brand grouping rule: first 4 characters of the Advertised SKU, uppercased. "
-            "Scoped to FBA-prefixed portfolios, excluding any 'Vizari' portfolios."
+            "Scoped to qualifying portfolios (FBA-named, or NARF-named for Mexico), excluding any "
+            "Vizari portfolios."
         )

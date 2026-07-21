@@ -219,19 +219,18 @@ GROUP_ORDER = ["CBT", "Exclusive", "Ageing", "MAP", "FBA"]
 # Sidebar controls (shared across tabs)
 # =================================================================
 countries_available = sorted(df["Country"].dropna().unique().tolist())
-default_countries = [c for c in countries_available if c == "United States"] or countries_available
+default_country = "United States" if "United States" in countries_available else countries_available[0]
 
-selected_countries = st.sidebar.multiselect(
+selected_country = st.sidebar.selectbox(
     "Marketplace / Country",
     options=countries_available,
-    default=default_countries,
+    index=countries_available.index(default_country),
+    help="One country at a time — portfolio names, qualifying rules, and currency all differ by "
+         "marketplace, so mixing countries together isn't meaningful here.",
 )
+selected_countries = [selected_country]  # kept as a list: the rest of the app filters/joins on this
 
-if not selected_countries:
-    st.warning("Select at least one country from the sidebar.")
-    st.stop()
-
-# ---- Resolve currency for the current country selection ----
+# ---- Resolve currency for the selected country ----
 # NOTE: Streamlit's markdown renderer treats a PAIR of literal "$" characters
 # within the same plain-text call (st.caption/st.warning/st.markdown without
 # unsafe_allow_html/expander labels) as LaTeX math-mode delimiters, which
@@ -241,21 +240,9 @@ if not selected_countries:
 # math parser. currency_symbol_md is the backslash-escaped version, used only
 # in plain-markdown text where two or more currency mentions might land in the
 # same call.
-distinct_currency_codes = {currency_for(c)["code"] or currency_for(c)["symbol"] for c in selected_countries}
-if len(distinct_currency_codes) == 1:
-    currency_symbol = currency_for(selected_countries[0])["symbol"]
-    currency_code = currency_for(selected_countries[0])["code"]
-    st.sidebar.caption(f"💱 Currency: {currency_code or currency_symbol} ({currency_symbol})")
-else:
-    currency_symbol = ""
-    currency_code = "MIXED"
-    mix_detail = ", ".join(f"{c} = {currency_for(c)['symbol'].replace('$', chr(92) + '$')}" for c in selected_countries)
-    st.sidebar.warning(
-        f"⚠️ Selected countries use different currencies ({mix_detail}). This app doesn't convert "
-        f"between currencies, so combined totals below are unconverted mixed-currency sums — not "
-        f"directly comparable. Select one country (or only same-currency countries) for accurate totals."
-    )
-
+currency_symbol = currency_for(selected_country)["symbol"]
+currency_code = currency_for(selected_country)["code"]
+st.sidebar.caption(f"💱 Currency: {currency_code or currency_symbol} ({currency_symbol})")
 currency_symbol_md = currency_symbol.replace("$", "\\$")
 
 # ---- Date range filter (custom start/end) ----
@@ -346,7 +333,12 @@ def build_metrics_table(data: pd.DataFrame, group_col, order=None) -> pd.DataFra
         Sales=("7 Day Total Sales - converted", "sum"),
     )
     if order is not None:
-        agg = agg.reindex(order).fillna(0)
+        # Only include groups that actually have qualifying data for the current
+        # selection — a country without any Exclusive/Ageing/CBT/MAP portfolios
+        # simply won't show that row, rather than padding it in as an all-zero
+        # placeholder. Whichever groups ARE present keep the canonical order.
+        present_in_order = [g for g in order if g in agg.index]
+        agg = agg.reindex(present_in_order)
 
     agg["ACOS %"] = (agg["Spend"] / agg["Sales"].replace(0, np.nan) * 100).round(2).fillna(0)
     agg["ROAS"] = (agg["Sales"] / agg["Spend"].replace(0, np.nan)).round(2).fillna(0)
@@ -605,9 +597,12 @@ with tab_group:
     )
 
     with st.expander("Which portfolios fall into each group?"):
-        for g in GROUP_ORDER:
+        groups_present = [g for g in GROUP_ORDER if g in table.index]
+        if not groups_present:
+            st.caption("No qualifying groups for this selection.")
+        for g in groups_present:
             names = sorted(base[base["Group"] == g]["Portfolio name"].unique())
-            st.markdown(f"**{g}** ({len(names)}): {', '.join(names) if names else '—'}")
+            st.markdown(f"**{g}** ({len(names)}): {', '.join(names)}")
 
     st.caption(
         "Grouping rule: qualifying portfolios must contain 'FBA' in the name (Mexico uses 'NARF' "
